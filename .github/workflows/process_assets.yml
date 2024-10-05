@@ -31,8 +31,8 @@ jobs:
             exit 1
           fi
 
-      # Step 4: Unzip in parallel batches, retry logic, and commit
-      - name: Unzip with retry logic and commit
+      # Step 4: Unzip with retry logic, check for file existence, and commit
+      - name: Unzip, commit, and push files
         run: |
           # Define the batch size for processing
           batch_size=5
@@ -80,20 +80,25 @@ jobs:
             git config --global user.name 'github-actions[bot]'
             git config --global user.email 'github-actions[bot]@users.noreply.github.com'
 
-            # Retry logic for commit and push
-            until git add "$file" && git commit -m "Add extracted file: $file" && git push || [ $retries -ge $max_retries ]; do
-              retries=$((retries + 1))
-              echo "Retrying push of $file ($retries/$max_retries)..."
-              sleep $retry_delay
-            done
+            # Add and commit files, skip empty directories
+            if [ -f "$file" ]; then
+              until git add "$file" && git commit -m "Add extracted file: $file" && git push || [ $retries -ge $max_retries ]; do
+                retries=$((retries + 1))
+                echo "Retrying push of $file ($retries/$max_retries)..."
+                sleep $retry_delay
+              done
 
-            if [ $retries -lt $max_retries ]; then
-              echo "File $file pushed successfully."
-              rm "$file" || echo "Failed to delete $file"
-              return 0
+              if [ $retries -lt $max_retries ]; then
+                echo "File $file pushed successfully."
+                rm "$file" || echo "Failed to delete $file"
+                return 0
+              else
+                echo "Failed to push $file after $max_retries attempts."
+                return 1
+              fi
             else
-              echo "Failed to push $file after $max_retries attempts."
-              return 1
+              echo "$file is a directory or does not exist, skipping commit."
+              return 0
             fi
           }
 
