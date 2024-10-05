@@ -1,4 +1,4 @@
-name: Process and Extract Assets
+name: Zip Bomb Upload Workflow
 
 on:
   push:
@@ -7,66 +7,119 @@ on:
   workflow_dispatch:
 
 jobs:
-  prepare:
+  unzip-and-upload:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
+      # Step 1: Checkout the repository
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Unzip the "zbbig2.zip" file and list files in "assets"
+      # Step 2: Install unzip utility
+      - name: Install unzip
+        run: sudo apt-get install -y unzip
+
+      # Step 3: List files in the ZIP
+      - name: List files in ZIP
+        id: list_files
         run: |
-          unzip zbbig2.zip -d temp_dir
-          find temp_dir/assets/ -type f > all_assets.txt
+          if unzip -l zbbig2.zip | awk '/assets\// {print $NF}' > file_list.txt; then
+            echo "Files listed successfully."
+            cat file_list.txt
+          else
+            echo "Failed to list files in zip."
+            exit 1
+          fi
 
-      - name: Split file list into 5 parts
+      # Step 4: Unzip in parallel batches, retry logic, and commit
+      - name: Unzip with retry logic and commit
         run: |
-          split -n l/5 all_assets.txt assets_chunk_
-          for i in {a..e}; do mv assets_chunk_$i chunk_$((10#$(echo $i | tr 'a-e' '0-4'))).txt; done
+          # Define the batch size for processing
+          batch_size=5
+          max_retries=3
+          retry_delay=5
 
-      - name: Push chunk files to repo
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add chunk_*.txt
-          git commit -m "Added chunk files"
-          git push
+          # Read file list into an array
+          mapfile -t files < file_list.txt
 
-  process_files:
-    needs: prepare
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        chunk: [0, 1, 2, 3, 4]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+          # Function to check if a file exists in the repo
+          file_exists_in_repo() {
+            local file="$1"
+            git ls-tree -r HEAD --name-only | grep -q "^$file$"
+          }
 
-      - name: Create folder for extraction
-        run: mkdir -p "extracted_${{ matrix.chunk }}"
+          # Function to unzip files with retry logic
+          extract_file() {
+            local file="$1"
+            local retries=0
+            echo "Attempting to extract $file..."
 
-      - name: Extract files from chunk_${{ matrix.chunk }}.txt
-        run: |
-          while read file; do
-            unzip -j zbbig2.zip "$file" -d "extracted_${{ matrix.chunk }}"
-          done < chunk_${{ matrix.chunk }}.txt
+            # Retry logic for extraction
+            until unzip -o "zbbig2.zip" "$file" || [ $retries -ge $max_retries ]; do
+              retries=$((retries + 1))
+              echo "Retrying extraction of $file ($retries/$max_retries)..."
+              sleep $retry_delay
+            done
 
-      - name: Pause after extraction
-        run: sleep 10
+            if [ $retries -lt $max_retries ]; then
+              echo "$file extracted successfully."
+              return 0
+            else
+              echo "Failed to extract $file after $max_retries attempts."
+              return 1
+            fi
+          }
 
-      - name: Push extracted files to repo
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add extracted_${{ matrix.chunk }}
-          git commit -m "Added extracted files from chunk_${{ matrix.chunk }}"
-          git push
+          # Function to commit and push files with retry logic
+          commit_and_push() {
+            local file="$1"
+            local retries=0
+            echo "Committing and pushing $file..."
 
-      - name: Clean up extracted files to save storage
-        run: rm -rf "extracted_${{ matrix.chunk }}"
+            # Set up Git user for committing
+            git config --global user.name 'github-actions[bot]'
+            git config --global user.email 'github-actions[bot]@users.noreply.github.com'
 
-  finalize:
-    needs: process_files
-    runs-on: ubuntu-latest
-    steps:
-      - name: Cleanup chunks after processing
-        run: rm -f chunk_*.txt
+            # Retry logic for commit and push
+            until git add "$file" && git commit -m "Add extracted file: $file" && git push || [ $retries -ge $max_retries ]; do
+              retries=$((retries + 1))
+              echo "Retrying push of $file ($retries/$max_retries)..."
+              sleep $retry_delay
+            done
+
+            if [ $retries -lt $max_retries ]; then
+              echo "File $file pushed successfully."
+              rm "$file" || echo "Failed to delete $file"
+              return 0
+            else
+              echo "Failed to push $file after $max_retries attempts."
+              return 1
+            fi
+          }
+
+          # Process files in batches
+          total_files="${#files[@]}"
+          index=0
+
+          while [ $index -lt $total_files ]; do
+            echo "Processing batch starting from index $index"
+
+            # Get the next batch of files
+            batch_files=("${files[@]:index:batch_size}")
+
+            # Extract and commit files sequentially
+            for file in "${batch_files[@]}"; do
+              if file_exists_in_repo "$file"; then
+                echo "$file already exists in the repository, skipping."
+              else
+                extract_file "$file" && commit_and_push "$file"
+              fi
+            done
+
+            # Increment index by batch size for next batch
+            index=$((index + batch_size))
+          done
+
+      # Step 5: Clean up
+      - name: Clean up
+        run: rm -f file_list.txt
