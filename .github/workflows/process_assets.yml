@@ -23,69 +23,54 @@ jobs:
       - name: List files in ZIP
         id: list_files
         run: |
-          if unzip -l zbbig2.zip | awk '/assets\// {print $NF}' > file_list.txt; then
-            echo "Files listed successfully."
-            cat file_list.txt
-          else
-            echo "Failed to list files in zip."
-            exit 1
-          fi
+          unzip -l zbbig2.zip | awk '/assets\// {print $NF}' > file_list.txt
+          echo "Successfully listed files to file_list.txt."
+          cat file_list.txt
 
       # Step 4: Unzip in parallel batches, but serialize Git operations
       - name: Unzip in parallel batches and commit
         run: |
           # Define the batch size for parallel processing
           batch_size=5
-
           # Read file list into an array
           mapfile -t files < file_list.txt
 
           # Function to unzip files
           extract_file() {
             local file="$1"
-            echo "Attempting to extract $file..."
-
-            # Use quotes to handle special characters in filenames
             if unzip -o "zbbig2.zip" "$file"; then
-              echo "$file extracted successfully."
+              echo "[Success] Extracted: $file"
             else
-              echo "Failed to extract $file"
+              echo "[Error] Failed to extract: $file" >&2
             fi
           }
 
           # Function to commit and push files (serialize this part)
           commit_and_push() {
             local file="$1"
-            echo "Committing and pushing $file..."
-
-            # Set up Git user for committing
             git config --global user.name 'github-actions[bot]'
             git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-
-            # Commit and push the extracted file
             if [ -f "$file" ]; then
               git add "$file"
               git commit -m "Add extracted file: $file"
-              git push || echo "Push failed for $file"
-              
-              # Delete the file after committing
-              rm "$file" || echo "Failed to delete $file"
+              if git push; then
+                echo "[Success] Pushed: $file"
+                rm "$file" || echo "[Warning] Failed to delete: $file"
+              else
+                echo "[Error] Push failed for: $file" >&2
+              fi
             else
-              echo "File $file was not found after extraction."
+              echo "[Error] File not found after extraction: $file" >&2
             fi
           }
 
           # Export the functions so xargs can access them
           export -f extract_file commit_and_push
-
-          # Process files in parallel batches
+          
           total_files="${#files[@]}"
           index=0
-
           while [ $index -lt $total_files ]; do
-            echo "Processing batch starting from index $index"
-
-            # Get the next batch of files
+            echo "Processing batch starting from index $index..."
             batch_files=("${files[@]:index:batch_size}")
 
             # Extract files in parallel
@@ -93,16 +78,14 @@ jobs:
               bash -c 'extract_file "$@"' _ "$file" &
             done
 
-            # Wait for all background processes to finish
-            wait
+            wait  # Wait for all background processes to finish
 
-            # Commit and push files (sequentially to avoid conflicts)
+            # Commit and push files sequentially to avoid conflicts
             for file in "${batch_files[@]}"; do
               bash -c 'commit_and_push "$@"' _ "$file"
             done
 
-            # Increment index by batch size for next batch
-            index=$((index + batch_size))
+            index=$((index + batch_size))  # Increment index by batch size
           done
 
       # Step 5: Clean up
