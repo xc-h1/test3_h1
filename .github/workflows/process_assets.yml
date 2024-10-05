@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        batch_index: [0, 1, 2, 3, 4] # Adjust based on total number of batches
+        batch_index: [0, 1, 2, 3, 4] # Adjust based on the total number of files/batches
 
     steps:
       # Step 1: Checkout the repository
@@ -32,8 +32,8 @@ jobs:
 
           # Split the file list into chunks for parallel processing
           split -l $batch_size file_list.txt batch_file_
-
-      # Step 4: Process batch files and commit immediately
+      
+      # Step 4: Process files in the assigned batch
       - name: Process batch files
         run: |
           batch_file="batch_file_$(printf "%02d" ${{ matrix.batch_index }})"
@@ -41,12 +41,13 @@ jobs:
             mapfile -t files < "$batch_file"
 
             for file in "${files[@]}"; do
+              # Extract file and commit it with retry logic
               retries=0
               max_retries=3
               retry_delay=5
-              
-              # Extract file with retry logic
+
               echo "Processing $file..."
+              
               until unzip -o "zbbig2.zip" "$file" || [ $retries -ge $max_retries ]; do
                 retries=$((retries + 1))
                 echo "Retrying extraction of $file ($retries/$max_retries)..."
@@ -55,35 +56,21 @@ jobs:
 
               if [ $retries -lt $max_retries ]; then
                 echo "$file extracted successfully."
-                
-                # Set up Git user and commit the file
+
+                # Commit and push file
                 git config --global user.name 'github-actions[bot]'
                 git config --global user.email 'github-actions[bot]@users.noreply.github.com'
                 git add "$file"
                 git commit -m "Add extracted file: $file"
-
-                # Push changes immediately
-                retries=0
-                until git push || [ $retries -ge $max_retries ]; do
-                  retries=$((retries + 1))
-                  echo "Retrying push of $file ($retries/$max_retries)..."
-                  sleep $retry_delay
-                done
-
-                if [ $retries -lt $max_retries ]; then
-                  echo "$file pushed successfully."
-
-                  # Clean up the file to free up memory
-                  rm "$file" || echo "Failed to delete $file"
-                else
-                  echo "Failed to push $file after $max_retries attempts."
-                fi
               else
                 echo "Failed to extract $file after $max_retries attempts."
               fi
             done
+
+            # Push the batch commit
+            git push
           fi
 
       # Step 5: Clean up
       - name: Clean up
-        run: rm -f file_list.txt batch_file_*
+        run: rm -f file_list.txt batch_file_* 
