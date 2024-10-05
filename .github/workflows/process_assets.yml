@@ -9,6 +9,9 @@ on:
 jobs:
   unzip-and-upload:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        batch_index: [0, 1, 2, 3, 4] # Adjust based on total number of batches
 
     steps:
       # Step 1: Checkout the repository
@@ -19,112 +22,68 @@ jobs:
       - name: Install unzip
         run: sudo apt-get install -y unzip
 
-      # Step 3: List files in the ZIP
-      - name: List files in ZIP
+      # Step 3: List files in the ZIP and split into batches
+      - name: List and split files into batches
         id: list_files
         run: |
-          if unzip -l zbbig2.zip | awk '/assets\// {print $NF}' > file_list.txt; then
-            echo "Files listed successfully."
-            cat file_list.txt
-          else
-            echo "Failed to list files in zip."
-            exit 1
-          fi
-
-      # Step 4: Unzip with retry logic, check for file existence, and commit
-      - name: Unzip, commit, and push files
-        run: |
-          # Define the batch size for processing
+          unzip -l zbbig2.zip | awk '/assets\// {print $NF}' > file_list.txt
+          total_files=$(wc -l < file_list.txt)
           batch_size=5
-          max_retries=3
-          retry_delay=5
 
-          # Read file list into an array
-          mapfile -t files < file_list.txt
+          # Split the file list into chunks for parallel processing
+          split -l $batch_size file_list.txt batch_file_
 
-          # Function to check if a file exists in the repo
-          file_exists_in_repo() {
-            local file="$1"
-            git ls-tree -r HEAD --name-only | grep -q "^$file$"
-          }
+      # Step 4: Process batch files and commit immediately
+      - name: Process batch files
+        run: |
+          batch_file="batch_file_$(printf "%02d" ${{ matrix.batch_index }})"
+          if [ -f "$batch_file" ]; then
+            mapfile -t files < "$batch_file"
 
-          # Function to unzip files with retry logic
-          extract_file() {
-            local file="$1"
-            local retries=0
-            echo "Attempting to extract $file..."
-
-            # Retry logic for extraction
-            until unzip -o "zbbig2.zip" "$file" || [ $retries -ge $max_retries ]; do
-              retries=$((retries + 1))
-              echo "Retrying extraction of $file ($retries/$max_retries)..."
-              sleep $retry_delay
-            done
-
-            if [ $retries -lt $max_retries ]; then
-              echo "$file extracted successfully."
-              return 0
-            else
-              echo "Failed to extract $file after $max_retries attempts."
-              return 1
-            fi
-          }
-
-          # Function to commit and push files with retry logic
-          commit_and_push() {
-            local file="$1"
-            local retries=0
-            echo "Committing and pushing $file..."
-
-            # Set up Git user for committing
-            git config --global user.name 'github-actions[bot]'
-            git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-
-            # Add and commit files, skip empty directories
-            if [ -f "$file" ]; then
-              until git add "$file" && git commit -m "Add extracted file: $file" && git push || [ $retries -ge $max_retries ]; do
+            for file in "${files[@]}"; do
+              retries=0
+              max_retries=3
+              retry_delay=5
+              
+              # Extract file with retry logic
+              echo "Processing $file..."
+              until unzip -o "zbbig2.zip" "$file" || [ $retries -ge $max_retries ]; do
                 retries=$((retries + 1))
-                echo "Retrying push of $file ($retries/$max_retries)..."
+                echo "Retrying extraction of $file ($retries/$max_retries)..."
                 sleep $retry_delay
               done
 
               if [ $retries -lt $max_retries ]; then
-                echo "File $file pushed successfully."
-                rm "$file" || echo "Failed to delete $file"
-                return 0
+                echo "$file extracted successfully."
+                
+                # Set up Git user and commit the file
+                git config --global user.name 'github-actions[bot]'
+                git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+                git add "$file"
+                git commit -m "Add extracted file: $file"
+
+                # Push changes immediately
+                retries=0
+                until git push || [ $retries -ge $max_retries ]; do
+                  retries=$((retries + 1))
+                  echo "Retrying push of $file ($retries/$max_retries)..."
+                  sleep $retry_delay
+                done
+
+                if [ $retries -lt $max_retries ]; then
+                  echo "$file pushed successfully."
+
+                  # Clean up the file to free up memory
+                  rm "$file" || echo "Failed to delete $file"
+                else
+                  echo "Failed to push $file after $max_retries attempts."
+                fi
               else
-                echo "Failed to push $file after $max_retries attempts."
-                return 1
-              fi
-            else
-              echo "$file is a directory or does not exist, skipping commit."
-              return 0
-            fi
-          }
-
-          # Process files in batches
-          total_files="${#files[@]}"
-          index=0
-
-          while [ $index -lt $total_files ]; do
-            echo "Processing batch starting from index $index"
-
-            # Get the next batch of files
-            batch_files=("${files[@]:index:batch_size}")
-
-            # Extract and commit files sequentially
-            for file in "${batch_files[@]}"; do
-              if file_exists_in_repo "$file"; then
-                echo "$file already exists in the repository, skipping."
-              else
-                extract_file "$file" && commit_and_push "$file"
+                echo "Failed to extract $file after $max_retries attempts."
               fi
             done
-
-            # Increment index by batch size for next batch
-            index=$((index + batch_size))
-          done
+          fi
 
       # Step 5: Clean up
       - name: Clean up
-        run: rm -f file_list.txt
+        run: rm -f file_list.txt batch_file_*
